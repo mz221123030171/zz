@@ -1,0 +1,73 @@
+import numpy as np
+from gnuradio import gr
+
+class qpsk_lms_filter(gr.sync_block):
+    """
+    QPSK LMS Filter with Time Alignment
+    """
+    def __init__(self, pn_sequence, learning_rate=0.01, filter_order=64):
+        """
+        :param pn_sequence: 伪随机序列（长度为L）
+        :param learning_rate: LMS算法的学习率
+        :param filter_order: 滤波器的阶数
+        """
+        super().__init__(
+            name="QPSK LMS Filter with Alignment",
+            in_sig=[np.complex64, np.complex64],  # 输入信号和期望信号
+            out_sig=[np.complex64]  # 滤波器输出信号
+        )
+        self.learning_rate = learning_rate
+        self.filter_order = filter_order
+        self.weights = np.zeros(filter_order, dtype=np.complex64)  # 初始化权值
+
+        # 生成QPSK调制的期望信号
+        self.pn_sequence = pn_sequence
+        self.qpsk_symbols = self.generate_qpsk_symbols(pn_sequence)
+
+    def generate_qpsk_symbols(self, pn_sequence):
+        """
+        将PN序列映射到QPSK符号
+        """
+        symbol_mapping = {
+            (0, 0): 1 + 1j,
+            (0, 1): 1 - 1j,
+            (1, 0): -1 + 1j,
+            (1, 1): -1 - 1j
+        }
+        qpsk_symbols = np.array([
+            symbol_mapping[(pn_sequence[i], pn_sequence[i+1])]
+            for i in range(0, len(pn_sequence), 2)
+        ], dtype=np.complex64)
+        return qpsk_symbols
+
+    def calculate_delay(self, x, d):
+        """
+        使用交叉相关计算输入信号与期望信号的延迟
+        """
+        corr = np.correlate(x, d, mode='full')
+        delay = np.argmax(np.abs(corr)) - len(d) + 1
+        return delay
+
+    def work(self, input_items, output_items):
+        x = input_items[0]  # 输入信号
+        d = self.qpsk_symbols  # QPSK调制的期望信号
+        y = output_items[0]  # 输出信号
+
+        # 确保信号长度一致
+        n_samples = len(x)
+        d = np.tile(d, n_samples // len(d) + 1)[:n_samples]  # 扩展期望信号至输入信号长度
+
+        # 计算延迟
+        delay = self.calculate_delay(x, d)
+
+        # 调整输入信号的延迟
+        aligned_x = np.roll(x, -delay)
+
+        # LMS算法：逐样本更新权值
+        for n in range(self.filter_order, n_samples):
+            x_segment = aligned_x[n - self.filter_order:n]
+            y[n] = np.dot(self.weights, x_segment)  # 滤波器输出
+            error = d[n] - y[n]  # 误差信号
+            self.weights += 2 * self.learning_rate * error * np.conj(x_segment)  # 更新权值
+
+        return len(output_items[0])
